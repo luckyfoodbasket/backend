@@ -171,7 +171,7 @@ router.get('/my', authenticate, async (req, res) => {
     try {
         const { data, error } = await supabaseAdmin
             .from('tickets')
-            .select('*, draws(id, title, bundle_value, status, images, winner_id, winning_ticket_id)')
+            .select('*, draws(id, title, bundle_value, status, images, winner_id, winning_ticket_id, draw_type, draw_date, ticket_price, total_tickets, sold_tickets, category)')
             .eq('user_id', req.user.id)
             .order('created_at', { ascending: false });
 
