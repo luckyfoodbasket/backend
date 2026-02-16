@@ -60,10 +60,19 @@ const authLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-// Rate limiting for financial endpoints (wallet, tickets)
+// Rate limiting for financial write endpoints (wallet, ticket purchases)
 const financialLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 60,
+    message: { error: 'Too many requests, please try again later', code: 'RATE_LIMITED' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Rate limiting for read-only data endpoints (generous — supports real-time polling)
+const readLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 120,
     message: { error: 'Too many requests, please try again later', code: 'RATE_LIMITED' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -94,7 +103,8 @@ app.use((req, res, next) => {
 // Apply rate limiting
 app.use('/api/auth', authLimiter);
 app.use('/api/wallet', financialLimiter);
-app.use('/api/tickets', financialLimiter);
+app.post('/api/tickets/buy', financialLimiter); // Strict limit on purchases only
+app.get('/api/tickets/*', readLimiter); // Generous limit for read-only ticket data
 app.use('/api/webhooks', webhookLimiter);
 
 // Main Routes
