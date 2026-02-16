@@ -6,9 +6,28 @@ const logger = require('../utils/logger');
 const { createNotification } = require('./notifications');
 const requireVerification = require('../middleware/requireVerification');
 
+// Get sold slot indices for a draw (Public - for ticket grid)
+router.get('/draw/:drawId/slots', async (req, res) => {
+    try {
+        const { data, error } = await supabaseAdmin
+            .from('tickets')
+            .select('slot_index')
+            .eq('draw_id', req.params.drawId)
+            .not('slot_index', 'is', null);
+
+        if (error) throw error;
+
+        const slots = (data || []).map(t => t.slot_index);
+        res.json({ slots });
+    } catch (err) {
+        logger.error('Sold slots error:', err);
+        res.status(500).json({ error: 'Failed to fetch sold slots' });
+    }
+});
+
 // Buy Tickets (User only) - Supports multiple tickets at once
 router.post('/buy', authenticate, requireVerification, async (req, res) => {
-    const { draw_id, quantity = 1 } = req.body;
+    const { draw_id, quantity = 1, slot_indices } = req.body;
     const userId = req.user.id;
 
     if (!draw_id) {
@@ -26,9 +45,33 @@ router.post('/buy', authenticate, requireVerification, async (req, res) => {
         maxTicketsPerPurchase: 50
     };
 
-    const qty = parseInt(quantity);
+    // Determine quantity from slot_indices if provided
+    const qty = slot_indices && Array.isArray(slot_indices) ? slot_indices.length : parseInt(quantity);
     if (isNaN(qty) || qty < 1 || qty > (config.maxTicketsPerPurchase || 50)) {
         return res.status(400).json({ error: `Quantity must be between 1 and ${(config.maxTicketsPerPurchase || 50)}` });
+    }
+
+    // Validate slot_indices if provided
+    if (slot_indices && Array.isArray(slot_indices)) {
+        // Check for duplicates
+        const uniqueSlots = new Set(slot_indices);
+        if (uniqueSlots.size !== slot_indices.length) {
+            return res.status(400).json({ error: 'Duplicate slot selections are not allowed' });
+        }
+
+        // Check if any selected slots are already taken
+        const { data: takenSlots } = await supabaseAdmin
+            .from('tickets')
+            .select('slot_index')
+            .eq('draw_id', draw_id)
+            .in('slot_index', slot_indices);
+
+        if (takenSlots && takenSlots.length > 0) {
+            return res.status(400).json({
+                error: 'Some selected slots are already taken. Please refresh and try again.',
+                taken_slots: takenSlots.map(t => t.slot_index),
+            });
+        }
     }
 
     try {
@@ -57,7 +100,17 @@ router.post('/buy', authenticate, requireVerification, async (req, res) => {
             return res.status(400).json({ error: result.error || 'Transaction failed' });
         }
 
-        // 3. Get draw title for notifications
+        // 3. Assign slot_indices to created tickets (after RPC success)
+        if (slot_indices && Array.isArray(slot_indices) && result.tickets) {
+            for (let i = 0; i < result.tickets.length && i < slot_indices.length; i++) {
+                await supabaseAdmin
+                    .from('tickets')
+                    .update({ slot_index: slot_indices[i] })
+                    .eq('id', result.tickets[i].id);
+            }
+        }
+
+        // 4. Get draw title for notifications
         const { data: draw } = await supabaseAdmin
             .from('draws')
             .select('title, vendor_id')
@@ -67,7 +120,7 @@ router.post('/buy', authenticate, requireVerification, async (req, res) => {
         const drawTitle = draw?.title || 'the draw';
         const ticketNumbers = result.tickets.map(t => t.ticket_number).join(', ');
 
-        // 4. Send purchase notification to user
+        // 5. Send purchase notification to user
         await createNotification(userId, {
             type: 'ticket',
             title: `${qty} Ticket${qty > 1 ? 's' : ''} Purchased!`,
@@ -76,7 +129,7 @@ router.post('/buy', authenticate, requireVerification, async (req, res) => {
             metadata: { drawId: draw_id, tickets: result.tickets, totalCost: result.total_cost },
         });
 
-        // 5. Handle referral bonus notifications if credited
+        // 6. Handle referral bonus notifications if credited
         if (result.referral_bonus_credited) {
             logger.success('Referral bonuses were credited via RPC', {
                 referrerId: result.referrer_id,
@@ -108,7 +161,7 @@ router.post('/buy', authenticate, requireVerification, async (req, res) => {
             }
         }
 
-        // 6. Handle draw completion (auto-draw for slot_complete)
+        // 7. Handle draw completion (auto-draw for slot_complete)
         if (result.draw_completed && result.draw_result?.success) {
             const winnerId = result.draw_result.winner_id;
             const winningTicketNumber = result.draw_result.winning_ticket_number;
