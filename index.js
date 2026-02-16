@@ -103,8 +103,13 @@ app.use((req, res, next) => {
 // Apply rate limiting
 app.use('/api/auth', authLimiter);
 app.use('/api/wallet', financialLimiter);
-app.post('/api/tickets/buy', financialLimiter); // Strict limit on purchases only
-app.get('/api/tickets/*', readLimiter); // Generous limit for read-only ticket data
+// Tickets: read-only routes get generous limit, buy route gets strict limit
+app.use('/api/tickets', (req, res, next) => {
+    if (req.method === 'POST') {
+        return financialLimiter(req, res, next);
+    }
+    return readLimiter(req, res, next);
+});
 app.use('/api/webhooks', webhookLimiter);
 
 // Main Routes
