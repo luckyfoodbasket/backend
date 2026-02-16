@@ -102,12 +102,17 @@ router.post('/buy', authenticate, requireVerification, async (req, res) => {
 
         // 3. Assign slot_indices to created tickets (after RPC success)
         if (slot_indices && Array.isArray(slot_indices) && result.tickets) {
-            for (let i = 0; i < result.tickets.length && i < slot_indices.length; i++) {
-                await supabaseAdmin
-                    .from('tickets')
-                    .update({ slot_index: slot_indices[i] })
-                    .eq('id', result.tickets[i].id);
-            }
+            // Batch update all slot_indices in parallel for speed
+            await Promise.all(
+                result.tickets.map((ticket, i) =>
+                    i < slot_indices.length
+                        ? supabaseAdmin
+                            .from('tickets')
+                            .update({ slot_index: slot_indices[i] })
+                            .eq('id', ticket.id)
+                        : Promise.resolve()
+                )
+            );
         }
 
         // 4. Get draw title for notifications
