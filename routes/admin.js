@@ -1407,6 +1407,32 @@ router.post('/tickets/issue', async (req, res) => {
             return res.status(500).json({ error: insertError.message || 'Failed to create tickets' });
         }
 
+        // 2b. Assign slot_index values so the animal grid on the web marks them as sold.
+        //     Find which slot indices are already taken, then pick the next available ones.
+        const { data: takenSlotRows } = await supabaseAdmin
+            .from('tickets')
+            .select('slot_index')
+            .eq('draw_id', draw_id)
+            .not('slot_index', 'is', null);
+
+        const takenSet = new Set((takenSlotRows || []).map(r => r.slot_index));
+        const availableSlots = [];
+        for (let idx = 0; availableSlots.length < qty && idx < (draw.total_tickets || 0); idx++) {
+            if (!takenSet.has(idx)) availableSlots.push(idx);
+        }
+
+        // Assign a slot_index to each newly created ticket
+        await Promise.all(
+            insertedTickets.map((ticket, i) =>
+                i < availableSlots.length
+                    ? supabaseAdmin
+                        .from('tickets')
+                        .update({ slot_index: availableSlots[i] })
+                        .eq('id', ticket.id)
+                    : Promise.resolve()
+            )
+        );
+
         // 3. Increment sold_tickets on the draw
         const { error: updateError } = await supabaseAdmin
             .from('draws')
