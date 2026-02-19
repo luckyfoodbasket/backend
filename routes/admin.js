@@ -1324,4 +1324,179 @@ router.post('/settings', async (req, res) => {
     }
 });
 
+// ============================================================
+// AGENT / PHYSICAL TICKET ISSUANCE
+// ============================================================
+
+/**
+ * Issue tickets on behalf of a walk-in customer (agent sale).
+ * Cash is collected physically — no wallet deduction.
+ * Slots are reserved, sold_tickets is incremented, and auto-draw
+ * fires if the draw type is slot_complete and it just filled up.
+ *
+ * POST /api/admin/tickets/issue
+ * Body: { draw_id, quantity, buyer_name, buyer_phone, payment_method }
+ */
+router.post('/tickets/issue', async (req, res) => {
+    const { draw_id, quantity = 1, buyer_name, buyer_phone, payment_method = 'cash' } = req.body;
+    const adminId = req.user.id;
+
+    if (!draw_id) {
+        return res.status(400).json({ error: 'draw_id is required' });
+    }
+    if (!buyer_name || !buyer_name.trim()) {
+        return res.status(400).json({ error: 'buyer_name is required' });
+    }
+
+    const qty = parseInt(quantity);
+    if (isNaN(qty) || qty < 1 || qty > 50) {
+        return res.status(400).json({ error: 'quantity must be between 1 and 50' });
+    }
+
+    try {
+        // 1. Fetch the draw
+        const { data: draw, error: drawError } = await supabaseAdmin
+            .from('draws')
+            .select('id, title, status, total_tickets, sold_tickets, ticket_price, draw_type, vendor_id, bundle_value')
+            .eq('id', draw_id)
+            .single();
+
+        if (drawError || !draw) {
+            return res.status(404).json({ error: 'Draw not found' });
+        }
+        if (draw.status !== 'active') {
+            return res.status(400).json({ error: `Draw is not active (status: ${draw.status})` });
+        }
+
+        const remaining = (draw.total_tickets || 0) - (draw.sold_tickets || 0);
+        if (remaining < qty) {
+            return res.status(400).json({ error: `Only ${remaining} slot(s) remaining in this draw` });
+        }
+
+        // 2. Generate ticket numbers and insert tickets
+        //    We use a simple loop — no wallet deduction, source is 'agent'
+        const ticketInserts = [];
+        for (let i = 0; i < qty; i++) {
+            // Same format as buy_tickets_v2 RPC: LB-XXXXXXXXX (9 random alphanumeric chars)
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            let ticketNumber = 'LB-';
+            for (let c = 0; c < 9; c++) {
+                ticketNumber += chars[Math.floor(Math.random() * chars.length)];
+            }
+
+            ticketInserts.push({
+                draw_id,
+                user_id: adminId,           // linked to admin who issued; no real user account
+                ticket_number: ticketNumber,
+                is_winner: false,
+                source: 'agent',            // distinguishes from online purchases
+                agent_buyer_name: buyer_name.trim(),
+                agent_buyer_phone: buyer_phone ? buyer_phone.trim() : null,
+                agent_payment_method: payment_method,
+                issued_by: adminId,
+            });
+        }
+
+        const { data: insertedTickets, error: insertError } = await supabaseAdmin
+            .from('tickets')
+            .insert(ticketInserts)
+            .select('id, ticket_number');
+
+        if (insertError) {
+            logger.error('Agent ticket insert error', insertError);
+            return res.status(500).json({ error: insertError.message || 'Failed to create tickets' });
+        }
+
+        // 3. Increment sold_tickets on the draw
+        const { error: updateError } = await supabaseAdmin
+            .from('draws')
+            .update({ sold_tickets: draw.sold_tickets + qty })
+            .eq('id', draw_id);
+
+        if (updateError) {
+            logger.error('Agent ticket — sold_tickets update error', updateError);
+            // Non-fatal: tickets are created; just log
+        }
+
+        // 4. Auto-execute draw if slot_complete and now full
+        let drawCompleted = false;
+        let drawResult = null;
+        const newSoldTickets = draw.sold_tickets + qty;
+
+        if (draw.draw_type === 'slot_complete' && newSoldTickets >= draw.total_tickets) {
+            const { data: result, error: rpcError } = await supabaseAdmin.rpc('execute_draw', {
+                draw_id,
+            });
+
+            if (!rpcError && result) {
+                drawCompleted = true;
+                drawResult = result;
+
+                logger.success('Auto-draw executed after agent sale filled all slots', { draw_id });
+
+                // Notify vendor
+                await createNotification(draw.vendor_id, {
+                    type: 'draw',
+                    title: 'Draw Completed!',
+                    message: `All slots for "${draw.title}" have been filled (including agent sales) and a winner has been selected.`,
+                    actionUrl: '/vendor/bundles',
+                    metadata: { drawId: draw_id },
+                });
+            }
+        }
+
+        logger.success('Agent tickets issued', {
+            drawId: draw_id,
+            quantity: qty,
+            buyerName: buyer_name,
+            issuedBy: adminId,
+            tickets: insertedTickets.map(t => t.ticket_number),
+        });
+
+        res.json({
+            success: true,
+            message: `${qty} ticket${qty > 1 ? 's' : ''} issued successfully`,
+            tickets: insertedTickets,
+            buyer_name: buyer_name.trim(),
+            draw_title: draw.title,
+            ticket_price: draw.ticket_price,
+            total_collected: (draw.ticket_price || 0) * qty,
+            draw_completed: drawCompleted,
+            draw_result: drawResult,
+        });
+    } catch (error) {
+        logger.error('Agent ticket issue error', error);
+        res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+});
+
+/**
+ * Get all agent-issued tickets for a draw (admin view)
+ * GET /api/admin/tickets/agent?draw_id=xxx
+ */
+router.get('/tickets/agent', async (req, res) => {
+    const { draw_id } = req.query;
+
+    try {
+        let query = supabaseAdmin
+            .from('tickets')
+            .select('id, ticket_number, agent_buyer_name, agent_buyer_phone, agent_payment_method, created_at, draw_id, draws:draw_id(title, ticket_price)')
+            .eq('source', 'agent')
+            .order('created_at', { ascending: false })
+            .limit(200);
+
+        if (draw_id) {
+            query = query.eq('draw_id', draw_id);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+
+        res.json({ tickets: data || [] });
+    } catch (error) {
+        logger.error('Fetch agent tickets error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 module.exports = router;
