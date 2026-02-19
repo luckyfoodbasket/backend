@@ -945,8 +945,30 @@ router.post('/users/:id/toggle-status', async (req, res) => {
     const adminId = req.user.id;
 
     try {
-        if (!['verify', 'unverify', 'lock_wallet', 'unlock_wallet'].includes(action)) {
-            return res.status(400).json({ error: 'Invalid action. Must be: verify, unverify, lock_wallet, unlock_wallet' });
+        const { role: newRole } = req.body;
+
+        if (!['verify', 'unverify', 'lock_wallet', 'unlock_wallet', 'change_role'].includes(action)) {
+            return res.status(400).json({ error: 'Invalid action. Must be: verify, unverify, lock_wallet, unlock_wallet, change_role' });
+        }
+
+        // Prevent admin from changing their own role
+        if (action === 'change_role' && req.params.id === adminId) {
+            return res.status(400).json({ error: 'You cannot change your own role' });
+        }
+
+        if (action === 'change_role') {
+            if (!['user', 'vendor', 'admin'].includes(newRole)) {
+                return res.status(400).json({ error: 'Invalid role. Must be: user, vendor, admin' });
+            }
+            const { error } = await supabaseAdmin
+                .from('profiles')
+                .update({ role: newRole })
+                .eq('id', req.params.id);
+
+            if (error) {
+                logger.error('Failed to update user role', error);
+                return res.status(500).json({ error: 'Failed to update role' });
+            }
         }
 
         if (action === 'verify' || action === 'unverify') {
