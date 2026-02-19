@@ -8,9 +8,25 @@ const { createNotification } = require('./notifications');
 const { initiateTransfer } = require('../services/flutterwave');
 const { sendEmail } = require('../services/email');
 
-// All admin routes require authentication + admin role
+// All admin routes require authentication
 router.use(authenticate);
-router.use(authorize(['admin']));
+
+// Agent-accessible routes (admin OR agent role) — registered BEFORE the admin-only guard
+router.use('/tickets', authorize(['admin', 'agent']));
+
+// Agents can read bundles (GET only) to populate the draw selector on the ticket issuance page
+router.use('/bundles', (req, res, next) => {
+    if (req.method === 'GET') return authorize(['admin', 'agent'])(req, res, next);
+    return next(); // non-GET bundles fall through to the admin-only guard below
+});
+
+// All other admin routes require admin role only
+router.use((req, res, next) => {
+    // Already authorized above if path starts with /tickets or is a GET /bundles
+    if (req.path.startsWith('/tickets')) return next();
+    if (req.path.startsWith('/bundles') && req.method === 'GET') return next();
+    return authorize(['admin'])(req, res, next);
+});
 
 /**
  * Get all withdrawal requests
@@ -957,8 +973,8 @@ router.post('/users/:id/toggle-status', async (req, res) => {
         }
 
         if (action === 'change_role') {
-            if (!['user', 'vendor', 'admin'].includes(newRole)) {
-                return res.status(400).json({ error: 'Invalid role. Must be: user, vendor, admin' });
+            if (!['user', 'vendor', 'admin', 'agent'].includes(newRole)) {
+                return res.status(400).json({ error: 'Invalid role. Must be: user, vendor, admin, agent' });
             }
             const { error } = await supabaseAdmin
                 .from('profiles')
