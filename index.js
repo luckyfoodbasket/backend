@@ -18,8 +18,10 @@ const referralRoutes = require('./routes/referral');
 const notificationRoutes = require('./routes/notifications');
 const vendorRegistrationRoutes = require('./routes/vendor_registration');
 const adminRoutes = require('./routes/admin');
-const keepAliveService = require('./services/keepAliveService');
 const drawScheduler = require('./services/drawScheduler');
+
+// Trust reverse proxy (fixes X-Forwarded-For header for rate limiting)
+app.set('trust proxy', 1);
 
 // Security headers
 app.use(helmet());
@@ -150,6 +152,5 @@ app.listen(PORT, () => {
         admin: '/api/admin',
     });
 
-    keepAliveService.init();
     drawScheduler.init();
 });
